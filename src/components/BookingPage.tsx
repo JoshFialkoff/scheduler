@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { format, addDays, parse, isWithinInterval, addMinutes } from 'date-fns'
 import { EventType, Availability, Booking } from '../types'
 
+const API_URL = import.meta.env.VITE_N8N_WEBHOOK_URL || "https://your-n8n-instance.com/webhook/book-meeting";
+
 const BookingPage = () => {
   const { eventTypeId } = useParams()
   const navigate = useNavigate()
@@ -14,62 +16,44 @@ const BookingPage = () => {
   const [selectedTime, setSelectedTime] = useState<string>('')
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
-  const [busyTimes, setBusyTimes] = useState<{start: Date, end: Date}[]>([])
+  const [busyTimes, setBusyTimes] = useState<{ start: Date, end: Date }[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
     const storedEventTypes = localStorage.getItem('eventTypes')
     const storedAvailability = localStorage.getItem('availability')
-    
+
     if (storedEventTypes) {
       const events: EventType[] = JSON.parse(storedEventTypes)
       const event = events.find((e) => e.url === eventTypeId)
       if (event) setEventType(event)
     }
-    
+
     if (storedAvailability) {
       setAvailability(JSON.parse(storedAvailability))
     }
   }, [eventTypeId])
 
   useEffect(() => {
-    const fetchGoogleCalendarEvents = async () => {
+    const fetchBusyTimes = async () => {
       setIsLoading(true)
-      const token = localStorage.getItem('googleCalendarToken')
-      if (!token) {
-        setIsLoading(false)
-        return
-      }
 
       try {
-        const startDateTime = new Date(selectedDate)
-        const endDateTime = addDays(startDateTime, 1)
-
-        const response = await window.gapi.client.calendar.events.list({
-          calendarId: 'primary',
-          timeMin: startDateTime.toISOString(),
-          timeMax: endDateTime.toISOString(),
-          singleEvents: true,
-          orderBy: 'startTime'
-        })
-
-        const events = response.result.items || []
-        const busy = events
-          .filter(event => event.start.dateTime && event.end.dateTime) // Only consider events with specific times
-          .map(event => ({
-            start: new Date(event.start.dateTime),
-            end: new Date(event.end.dateTime)
-          }))
-        setBusyTimes(busy)
+        const response = await fetch(`${API_URL}/availability?date=${selectedDate}`)
+        const data = await response.json()
+        setBusyTimes(data.busyTimes.map(event => ({
+          start: new Date(event.startTime),
+          end: new Date(event.endTime)
+        })))
       } catch (error) {
-        console.error('Error fetching Google Calendar events:', error)
+        console.error('Error fetching busy times:', error)
       } finally {
         setIsLoading(false)
       }
     }
 
     if (selectedDate) {
-      fetchGoogleCalendarEvents()
+      fetchBusyTimes()
     }
   }, [selectedDate])
 
@@ -78,8 +62,7 @@ const BookingPage = () => {
   }
 
   const isTimeSlotAvailable = (timeSlot: Date) => {
-    // Check if the time slot overlaps with any busy period
-    return !busyTimes.some(busy => 
+    return !busyTimes.some(busy =>
       isWithinInterval(timeSlot, { start: busy.start, end: busy.end }) ||
       isWithinInterval(addMinutes(timeSlot, eventType.duration), { start: busy.start, end: busy.end })
     )
@@ -89,15 +72,13 @@ const BookingPage = () => {
     if (!eventType) return []
 
     const date = parse(selectedDate, 'yyyy-MM-dd', new Date())
-    const dayAvailability = availability.find(
-      (a) => a.dayOfWeek === date.getDay()
-    )
+    const dayAvailability = availability.find((a) => a.dayOfWeek === date.getDay())
 
     if (!dayAvailability) return []
 
     const startTime = parse(dayAvailability.startTime, 'HH:mm', date)
     const endTime = parse(dayAvailability.endTime, 'HH:mm', date)
-    
+
     const slots = []
     let currentSlot = startTime
 
@@ -118,42 +99,28 @@ const BookingPage = () => {
     const endDateTime = addMinutes(startDateTime, eventType.duration)
 
     const booking: Booking = {
-      id: crypto.randomUUID(),
       eventTypeId: eventType.id,
       startTime: startDateTime.toISOString(),
+      endTime: endDateTime.toISOString(),
       name,
-      email,
+      email
     }
 
-    // Save to local storage
-    const storedBookings = localStorage.getItem('bookings')
-    const bookings = storedBookings ? JSON.parse(storedBookings) : []
-    localStorage.setItem('bookings', JSON.stringify([...bookings, booking]))
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(booking)
+      })
 
-    // Create Google Calendar event
-    const token = localStorage.getItem('googleCalendarToken')
-    if (token) {
-      try {
-        await window.gapi.client.calendar.events.insert({
-          calendarId: 'primary',
-          resource: {
-            summary: `${eventType.name} with ${name}`,
-            description: eventType.description,
-            start: {
-              dateTime: startDateTime.toISOString(),
-            },
-            end: {
-              dateTime: endDateTime.toISOString(),
-            },
-            attendees: [{ email }],
-          },
-        })
-      } catch (error) {
-        console.error('Error creating Google Calendar event:', error)
+      if (response.ok) {
+        navigate('/')
+      } else {
+        alert("Error booking the meeting. Please try again.")
       }
+    } catch (error) {
+      console.error("Error submitting booking:", error)
     }
-
-    navigate('/')
   }
 
   return (
